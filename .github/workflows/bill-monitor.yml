@@ -1,0 +1,94 @@
+name: 국회 법안 모니터링
+
+on:
+  # 매일 오전 9시 (KST = UTC+9 → UTC 00:00)
+  schedule:
+    - cron: "0 0 * * 1-5"   # 평일만
+
+  # 수동 실행 — 날짜 범위 직접 지정 가능
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "시작일 (YYYY-MM-DD, 비우면 어제)"
+        required: false
+      date_to:
+        description: "종료일 (YYYY-MM-DD, 비우면 오늘)"
+        required: false
+      proposer:
+        description: "발의자 이름 (예: 이병진)"
+        required: false
+      keyword:
+        description: "법안명 키워드 (예: 해운법)"
+        required: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      # ── 날짜 계산 (수동 입력 없으면 어제~오늘) ──────────────
+      - name: 날짜 설정
+        id: dates
+        run: |
+          if [ -n "${{ github.event.inputs.date_from }}" ]; then
+            echo "FROM=${{ github.event.inputs.date_from }}" >> $GITHUB_OUTPUT
+          else
+            echo "FROM=$(date -d 'yesterday' '+%Y-%m-%d')" >> $GITHUB_OUTPUT
+          fi
+          if [ -n "${{ github.event.inputs.date_to }}" ]; then
+            echo "TO=${{ github.event.inputs.date_to }}" >> $GITHUB_OUTPUT
+          else
+            echo "TO=$(date '+%Y-%m-%d')" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 법안 수집 ────────────────────────────────────────────
+      - name: 법안 수집 및 필터링
+        id: fetch
+        run: |
+          ARGS="--from ${{ steps.dates.outputs.FROM }} --to ${{ steps.dates.outputs.TO }}"
+
+          # 수동 실행 시 추가 필터 적용
+          if [ -n "${{ github.event.inputs.proposer }}" ]; then
+            ARGS="$ARGS --proposer ${{ github.event.inputs.proposer }}"
+          fi
+          if [ -n "${{ github.event.inputs.keyword }}" ]; then
+            ARGS="$ARGS --keyword ${{ github.event.inputs.keyword }}"
+          fi
+
+          python fetch_bills.py $ARGS --json > result.json
+          cat result.json
+
+          # 건수 추출
+          COUNT=$(python -c "import json; d=json.load(open('result.json')); print(len(d))" 2>/dev/null || echo 0)
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      # ── 결과를 아티팩트로 저장 ───────────────────────────────
+      - name: 결과 저장
+        uses: actions/upload-artifact@v4
+        with:
+          name: bills-${{ steps.dates.outputs.FROM }}-${{ steps.dates.outputs.TO }}
+          path: result.json
+          retention-days: 30
+
+      # ── Slack 알림 (선택 — SLACK_WEBHOOK secret 설정 시 활성화) ──
+      - name: Slack 알림
+        if: ${{ steps.fetch.outputs.count > 0 && secrets.SLACK_WEBHOOK != '' }}
+        run: |
+          COUNT=${{ steps.fetch.outputs.count }}
+          FROM=${{ steps.dates.outputs.FROM }}
+          TO=${{ steps.dates.outputs.TO }}
+          MSG="📋 *국회 법안 모니터링* (${FROM} ~ ${TO})\n신규 ${COUNT}건 감지\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+            -H 'Content-type: application/json' \
+            --data "{\"text\":\"${MSG}\"}"
