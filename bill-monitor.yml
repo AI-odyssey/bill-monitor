@@ -37,7 +37,7 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      # ── 날짜 계산 (수동 입력 없으면 어제~오늘) ──────────────
+      # ── 날짜 계산 ──────────────────────────────────────────
       - name: 날짜 설정
         id: dates
         run: |
@@ -52,13 +52,12 @@ jobs:
             echo "TO=$(date '+%Y-%m-%d')" >> $GITHUB_OUTPUT
           fi
 
-      # ── 법안 수집 ────────────────────────────────────────────
+      # ── 법안 수집 ──────────────────────────────────────────
       - name: 법안 수집 및 필터링
         id: fetch
         run: |
           ARGS="--from ${{ steps.dates.outputs.FROM }} --to ${{ steps.dates.outputs.TO }}"
 
-          # 수동 실행 시 추가 필터 적용
           if [ -n "${{ github.event.inputs.proposer }}" ]; then
             ARGS="$ARGS --proposer ${{ github.event.inputs.proposer }}"
           fi
@@ -69,11 +68,10 @@ jobs:
           python fetch_bills.py $ARGS --json > result.json
           cat result.json
 
-          # 건수 추출
           COUNT=$(python -c "import json; d=json.load(open('result.json')); print(len(d))" 2>/dev/null || echo 0)
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
-      # ── 결과를 아티팩트로 저장 ───────────────────────────────
+      # ── 결과 아티팩트 저장 ─────────────────────────────────
       - name: 결과 저장
         uses: actions/upload-artifact@v4
         with:
@@ -81,14 +79,20 @@ jobs:
           path: result.json
           retention-days: 30
 
-      # ── Slack 알림 (선택 — SLACK_WEBHOOK secret 설정 시 활성화) ──
+      # ── Slack 알림 (SLACK_WEBHOOK secret 설정 시 활성화) ───
       - name: Slack 알림
-        if: ${{ steps.fetch.outputs.count > 0 && secrets.SLACK_WEBHOOK != '' }}
+        if: ${{ steps.fetch.outputs.count > 0 }}
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "SLACK_WEBHOOK 미설정, 알림 스킵"
+            exit 0
+          fi
           COUNT=${{ steps.fetch.outputs.count }}
           FROM=${{ steps.dates.outputs.FROM }}
           TO=${{ steps.dates.outputs.TO }}
           MSG="📋 *국회 법안 모니터링* (${FROM} ~ ${TO})\n신규 ${COUNT}건 감지\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+          curl -s -X POST "$SLACK_WEBHOOK" \
             -H 'Content-type: application/json' \
             --data "{\"text\":\"${MSG}\"}"
